@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CredU</title>
+<style>
+:root{--bg:#f3f6f4;--card:#fff;--text:#14231c;--muted:#5d6f66;--accent:#1f7a55;--warn:#c2410c;--line:#dde5e0}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1713;--card:#17221c;--text:#e6f0ea;--muted:#8fa399;--accent:#4cc38a;--warn:#ff9466;--line:#25342c}}
+*{box-sizing:border-box}
+body{margin:0;padding:20px;background:var(--bg);color:var(--text);font:15px/1.5 Georgia,"Times New Roman",serif}
+.wrap{max-width:980px;margin:0 auto}
+h1{font-size:28px;margin:0}
+.sub{color:var(--muted);margin:2px 0 20px}
+h2{font-size:17px;margin:0 0 10px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+.stats{display:flex;gap:28px;flex-wrap:wrap;margin-bottom:18px}
+.stats b{display:block;font-size:30px;line-height:1.1}
+.stats span{color:var(--muted)}
+ul{list-style:none;margin:0;padding:0}
+li{padding:8px 0;border-bottom:1px solid var(--line)}
+li:last-child{border:0}
+.bar{height:8px;background:var(--line);border-radius:4px;margin:3px 0 10px}
+.bar i{display:block;height:100%;background:var(--accent);border-radius:4px}
+table{width:100%;border-collapse:collapse}
+td,th{text-align:left;padding:7px 4px;border-bottom:1px solid var(--line)}
+.neg{color:var(--warn)}
+.scroll{overflow-x:auto}
+.auth{max-width:380px;margin:60px auto}
+input{display:block;width:100%;padding:10px;margin:0 0 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);font:inherit}
+button{padding:10px 16px;border:0;border-radius:8px;background:var(--accent);color:#fff;font:inherit;cursor:pointer}
+button.link{background:none;color:var(--accent);padding:0;text-decoration:underline}
+.msg{color:var(--warn);min-height:1.5em;margin:8px 0}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="auth" class="card auth">
+    <h1>CredU</h1>
+    <p class="sub" id="authTitle">Sign in to track your finances.</p>
+    <input id="name" placeholder="Full name" autocomplete="name" hidden>
+    <input id="email" type="email" placeholder="Email" autocomplete="username">
+    <input id="pw" type="password" placeholder="Password" autocomplete="current-password">
+    <input id="code" placeholder="Confirmation code from your email" hidden>
+    <button id="go">Sign in</button>
+    <p class="msg" id="msg"></p>
+    <button class="link" id="swap">Create an account</button>
+  </div>
+
+  <div id="app" hidden>
+    <h1>CredU</h1>
+    <p class="sub"><span id="sub">Loading your data...</span> <button class="link" id="out">Sign out</button></p>
+    <div class="stats">
+      <div><b id="spent">-</b><span>spent this month</span></div>
+      <div><b id="nalerts">-</b><span>alerts</span></div>
+      <div><b id="util">-</b><span>credit used</span></div>
+    </div>
+    <div class="grid">
+      <div class="card"><h2>Alerts</h2><ul id="alerts"></ul></div>
+      <div class="card"><h2>Upcoming bills</h2><ul id="bills"></ul></div>
+    </div>
+    <div class="grid">
+      <div class="card"><h2>Spending by category</h2><div id="cats"></div></div>
+      <div class="card"><h2>Recent transactions</h2><div class="scroll"><table id="txns"></table></div></div>
+    </div>
+  </div>
+</div>
+<script>
+const API_URL = "https://ctyy6ybr44tpptz3cyciu7qyxm0bbihj.lambda-url.us-east-2.on.aws/";
+const POOL_ID = "us-east-2_eQDW7wgvl";
+const CLIENT_ID = "5riuk916psar023s88rrp3ro1t";
+const REGION = POOL_ID.split("_")[0];
+const $ = id => document.getElementById(id);
+const money = n => "$" + Number(n).toFixed(2);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const li = t => "<li>" + t + "</li>";
+const month = new Date().toISOString().slice(0, 7);
+
+async function cognito(target, body) {
+  const r = await fetch("https://cognito-idp." + REGION + ".amazonaws.com/", {
+    method: "POST",
+    headers: {"Content-Type": "application/x-amz-json-1.1", "X-Amz-Target": "AWSCognitoIdentityProviderService." + target},
+    body: JSON.stringify(body)
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.message || d.__type || "Request failed");
+  return d;
+}
+
+let mode = "in";
+function setMode(m) {
+  mode = m;
+  $("code").hidden = m !== "confirm";
+  $("name").hidden = m !== "up";
+  $("pw").hidden = m === "confirm";
+  $("go").textContent = {in: "Sign in", up: "Create account", confirm: "Confirm"}[m];
+  $("authTitle").textContent = {in: "Sign in to track your finances.", up: "Create your account.", confirm: "Check your email for a code."}[m];
+  $("swap").textContent = m === "in" ? "Create an account" : "Back to sign in";
+  $("swap").hidden = m === "confirm";
+}
+$("swap").onclick = () => { $("msg").textContent = ""; setMode(mode === "in" ? "up" : "in"); };
+
+$("go").onclick = async () => {
+  const email = $("email").value.trim(), pw = $("pw").value;
+  $("msg").textContent = "";
+  try {
+    if (mode === "up") {
+      await cognito("SignUp", {ClientId: CLIENT_ID, Username: email, Password: pw, UserAttributes: [{Name: "email", Value: email}, {Name: "name", Value: $("name").value.trim()}]});
+      setMode("confirm");
+    } else if (mode === "confirm") {
+      await cognito("ConfirmSignUp", {ClientId: CLIENT_ID, Username: email, ConfirmationCode: $("code").value.trim()});
+      setMode("in");
+      $("msg").textContent = "Account confirmed. Sign in now.";
+    } else {
+      const d = await cognito("InitiateAuth", {AuthFlow: "USER_PASSWORD_AUTH", ClientId: CLIENT_ID, AuthParameters: {USERNAME: email, PASSWORD: pw}});
+      if (!d.AuthenticationResult) throw new Error("Password change required. Create a new account instead.");
+      sessionStorage.setItem("token", d.AuthenticationResult.AccessToken);
+      load();
+    }
+  } catch (e) { $("msg").textContent = e.message; }
+};
+
+$("out").onclick = () => { sessionStorage.removeItem("token"); location.reload(); };
+
+function load() {
+    const token = sessionStorage.getItem("token") || "demo";
+  fetch(API_URL, {headers: {Authorization: "Bearer " + token}})
+    .then(r => { if (r.status === 401) throw new Error("expired"); return r.json(); })
+    .then(d => {
+      $("auth").hidden = true;
+      $("app").hidden = false;
+      const spend = d.spend.filter(s => s.sk.split("#")[1] === month);
+      $("spent").textContent = money(spend.reduce((a, s) => a + s.total, 0));
+      $("nalerts").textContent = d.alerts.length;
+      const lim = d.accounts.reduce((a, x) => a + x.creditLimit, 0);
+      const bal = d.accounts.reduce((a, x) => a + x.balance, 0);
+      $("util").textContent = lim ? Math.round(bal / lim * 100) + "%" : "-";
+      $("alerts").innerHTML = d.alerts.map(a => li(esc(a.message))).join("") || li("No alerts right now.");
+      $("bills").innerHTML = d.bills.map(b =>
+        li(esc(b.name) + ": " + money(b.amount) + ", due " + esc((b.GSI1PK || "").replace("BILLDUE#", "")))
+      ).join("") || li("No bills added yet.");
+      const max = Math.max(1, ...spend.map(s => s.total));
+      $("cats").innerHTML = spend.map(s =>
+        "<div>" + esc(s.sk.split("#")[2]) + ": " + money(s.total) +
+        "<div class='bar'><i style='width:" + (s.total / max * 100) + "%'></i></div></div>"
+      ).join("") || "No spending recorded this month.";
+      $("txns").innerHTML = "<tr><th>Date</th><th>Merchant</th><th>Category</th><th>Amount</th></tr>" +
+        d.transactions.slice(0, 10).map(t =>
+          "<tr><td>" + esc(t.sk.split("#")[1]) + "</td><td>" + esc(t.merchant) + "</td><td>" +
+          esc(t.category) + "</td><td class='" + (t.amount < 0 ? "neg" : "") + "'>" + money(t.amount) + "</td></tr>"
+        ).join("");
+      $("sub").textContent = "Signed in.";
+    })
+    .catch(() => { sessionStorage.removeItem("token"); $("auth").hidden = false; $("app").hidden = true; $("msg").textContent = "Please sign in again."; });
+}
+setMode("in");
+load();
+</script>
+</body>
+</html>
